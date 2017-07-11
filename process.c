@@ -38,6 +38,7 @@ static int nextAvailPid = 0;
  ***************************************************************/
 static int Create(int priority);
 static int Fork();
+static int Kill();
 static void PrintHelp();
 static void PrintQueueStatus();
 static void AddProcessToReadyQueue(PROCESS *process);
@@ -81,6 +82,13 @@ int main(void) {
 				/* fall-through */
 			case 'F':
 				Fork();
+				break;
+
+			/* Kill */
+			case 'k':
+				/* fall-through */
+			case 'K':
+				Kill();
 				break;
 
 			/* Help */
@@ -134,6 +142,7 @@ static int Create(int priority) {
 /** 
  * Forks the currently running process.
  * Will fail on an attempt to fork the INIT process.
+ * Returns PID of forked process on success, -1 on failure.
  */
 static int Fork() {
 	if (runningProcess == initProcess) {
@@ -155,6 +164,53 @@ static int Fork() {
 	PrintQueueStatus();
 	return process->pid;
 }
+
+/** 
+ * Forks the currently running process.
+ * Will fail on an attempt to fork the INIT process.
+ */
+static int Kill() {
+	/* Parse PID from input buffer */
+	char *pidChars = inputBuffer[2];
+	int pid = atoi(pidChars);
+
+	/* Check for attempt to kill INIT process */
+	/* Terminate OS if only INIT process is left and it is killed */
+	/* Otherwise keep the INIT process alive and return -1 */
+	if (pid == 0) { 
+		if (ListCount(highReadyQueue) == 0
+				&& ListCount(normalReadyQueue) == 0
+				&& ListCount(lowReadyQueue) == 0
+				&& ListCount(blockedQueue) == 0) {
+			printf("[K] Killing the INIT process.\n");
+			printf("[K] No processes running.\n");
+			printf("[K] Terminating the OS. Goodbye.\n\n");
+			exit(0);
+		} else {
+			printf("[K] Can't kill the INIT process while other processes are in the OS.\n");
+			PrintQueueStatus();
+			return -1;
+		}
+	}
+
+	/* Check if PID within the range of created PIDs */
+	if (pid < 0 || pid >= nextAvailPid) {
+		printf("[K] Invalid PID specified.\n");
+		PrintQueueStatus();
+		return -1;
+	}
+
+	/* Search for PID in queues */
+	void *ListSearch(LIST *list, int (*comparator)(void *, void *), void *comparisonArg);
+	PROCESS *process = NULL;
+	ListSearch(highReadyQueue, )
+
+	/* Delete it from the queue if found */
+}
+
+/***************************************************************
+ * Helper Functions                                            *
+ ***************************************************************/
 
 /* Adds a process to the appropriate ready queue based on priority */
 static void AddProcessToReadyQueue(PROCESS *process) {
@@ -225,5 +281,27 @@ static void PrintQueueStatus() {
 		printf("\n");
 	}
 
+	printf("[OS] Blocked processes: ");
+	if (ListCount(blockedQueue) == 0) {
+		printf("NONE\n");
+	} else {
+		ListFirst(blockedQueue);
+		for (int i = 0; i < ListCount(blockedQueue); i++) {
+			PROCESS *process = (PROCESS *)ListCurr(blockedQueue);
+			printf("%d, ", process->pid);
+			ListNext(blockedQueue);
+		}
+		printf("\n");
+	}
+
+	printf("[OS] Running process - PID: %d, Priority: %s\n", 
+		runningProcess->pid, PRIORITIES[runningProcess->priority]);
+	printf("[OS] Init process - PID: %d, Priority: %s\n", 
+		initProcess->pid, PRIORITIES[initProcess->priority]);
+
 	printf("[OS] Ready for next command:\n\n");
+}
+
+static void PidComparator(void *proc1, void *proc2) {
+	
 }
