@@ -1,7 +1,11 @@
-/**
- * Structs
- */
+/***************************************************************
+ * Imports                                                     *
+ ***************************************************************/
+#include "list.h"
 
+/***************************************************************
+ * Structs                                                     *
+ ***************************************************************/
 typedef enum PRIORITY {
 	HIGH,
 	NORMAL,
@@ -11,15 +15,19 @@ typedef enum PRIORITY {
 
 typedef enum STATE {
 	RUNNING,
-	READY
+	READY,
+	BLOCKED_SEM,
+	BLOCKED_SEND,
+	BLOCKED_RCV
 } STATE;
+
+typedef struct SEMAPHORE {
+	int value;
+	LIST *blockedList;
+} SEMAPHORE;
 
 typedef struct PROCESS {
 	PRIORITY priority;
 	STATE state;
 	int pid;
 } PROCESS;
-
-/**
- * Function prototypes
- */
