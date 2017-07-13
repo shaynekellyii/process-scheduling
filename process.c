@@ -8,11 +8,11 @@
  * Imports                                                     *
  ***************************************************************/
 #include "process.h"
-#include "list.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
 #include <unistd.h>
+#include <string.h>
 
 /***************************************************************
  * Defines and Constants                                       *
@@ -20,6 +20,7 @@
 #define TERMINAL_FD		0
 #define BUF_SIZE		500
 #define NUM_SEMAPHORES	5
+#define MAX_MSG_LEN		40
 static const char * const PRIORITIES[4] = {"HIGH", "NORMAL", "LOW", "INIT"};
 static const char * const STATES[5] = 
 	{"RUNNING", "READY", "SEM BLOCKED", "SEND BLOCKED", "RECEIVE BLOCKED"};
@@ -31,6 +32,7 @@ static LIST *highReadyQueue;
 static LIST *normalReadyQueue;
 static LIST *lowReadyQueue;
 static LIST *blockedQueue;
+static LIST *msgQueue;
 static PROCESS *initProcess = NULL;
 static PROCESS *runningProcess = NULL;
 static SEMAPHORE *semaphoreArr[NUM_SEMAPHORES] = {NULL};
@@ -47,6 +49,7 @@ static int Quantum();
 static int NewSemaphore(int id, int value);
 static void P(int id);
 static void V(int id);
+static void Send();
 static void ProcInfo(int pid);
 static void TotalInfo();
 
@@ -57,6 +60,7 @@ static int PidComparator(void *proc1, void *proc2);
 static PROCESS *GetProcByPid(int pid);
 static int FindProcByPidAndDelete(int pid);
 static void RemovePidFromBlockedQueue(PROCESS *process);
+static PROCESS *SearchBlockedQueue(int pid);
 
 /***************************************************************
  * Global Functions                                            *
@@ -71,11 +75,13 @@ int main(void) {
 	normalReadyQueue = ListCreate();
 	lowReadyQueue = ListCreate();
 	blockedQueue = ListCreate();
+	msgQueue = ListCreate();
 
 	printf("The INIT process will be created...\n");
 	if (Create(INIT) < 0) {
 		return -1;
 	}
+	initProcess->state = RUNNING;
 	printf("********** Ready for commands **********\n\n");
 
 	/* Infinite loop to read terminal commands */
@@ -160,6 +166,14 @@ int main(void) {
 				V((int)(inputBuffer[2] - '0'));
 				break;
 
+			/* Send */
+			case 's':
+				/* fall-through */
+			case 'S':
+				printf("********** Send command issued **********\n");
+				Send();
+				break;
+
 			/* Procinfo */
 			case 'i':
 				/* fall-through */
@@ -217,6 +231,7 @@ static int Create(int priority) {
 	process->pid = nextAvailPid;
 	nextAvailPid++;
 	process->state = READY;
+	process->msg = NULL;
 
 	AddProcessToReadyQueue(process);
 
@@ -234,7 +249,7 @@ static int Create(int priority) {
  */
 static int Fork() {
 	if (runningProcess == initProcess) {
-		printf("Attempted to fork the init process. Fork failed.\n\n");
+		printf("Attempted to fork the init process. Fork failed.\n");
 		return -1;
 	}
 
@@ -313,6 +328,7 @@ static int Quantum() {
 		AddProcessToReadyQueue(runningProcess);
 	} else {
 		printf("The running process was the INIT process. Not adding to ready queue...\n");
+		initProcess->state = READY;
 	}
 
 	SelectNewRunningProcess();
@@ -446,6 +462,73 @@ static void V(int id) {
 	}
 }
 
+/** 
+ * Send a message to the PID specified.
+ * Both the message and PID are extracted from the user input buffer.
+ */
+static void Send() {
+	/**
+	 * Find the PID. Separate the PID and message by finding the space in between them 
+	 * and null-terminating the end of the PID. 
+	 */
+	char *space = strchr(inputBuffer + 2, ' ');
+	char *inputMsg = space + 1;
+	*space = '\0';
+
+	/* Parse out the PID and validate it. */
+	int pid = atoi(inputBuffer + 2);
+	if (pid < 0 || pid >= nextAvailPid) {
+		printf("Invalid PID specified (%d).\n", pid);
+		printf("Failed to send the message.\n");
+		return;
+	}
+
+	/* Check if the message is a valid length. */
+	if (strlen(inputMsg) > MAX_MSG_LEN) {
+		printf("The message is too long. The max length is 40 characters.\n");
+		printf("Failed to send the message.\n");
+		return;
+	} else if (!strlen(inputMsg)) {
+		printf("Empty messages can't be sent.\n");
+		printf("Failed to send the message.\n");
+		return;
+	}
+
+	/* Build the message and add it to the inbox. */
+	printf("Building the message to send to PID %d.\n", pid);
+	MSG *msg = (MSG *)malloc(sizeof(MSG));
+	char *msgContent = (char *)malloc(sizeof(char) * (strlen(inputMsg) + 1));
+	strcpy(msgContent, inputMsg);
+	msg->pid = pid;
+	msg->text = msgContent;
+	ListAppend(msgQueue, msg);
+
+	/* Check if the process that the message will be sent to is already blocked on a receive. */
+	/* Search the blocked queue for the destination PID. */
+	PROCESS *rcvProcess = SearchBlockedQueue(pid);
+	if (rcvProcess) {
+		printf("The destination process was already waiting for a message.\n");
+		
+		/* Copy the message to the process */
+		rcvProcess->msg = msgContent;
+
+		/* Wake up the process */
+		printf("Waking up the receiver process and placing it on the ready queue.\n");
+		rcvProcess->state = READY;
+		RemovePidFromBlockedQueue(rcvProcess);
+		AddProcessToReadyQueue(rcvProcess);
+	}
+
+	/* Block the sending process until a reply is received. */
+	printf("Blocking the sending process (PID %d) until a reply is received.\n", runningProcess->pid);
+	runningProcess->state = BLOCKED_SEND;
+	ListAppend(blockedQueue, runningProcess);
+
+	/* Allow the next ready process to run. */
+	printf("Selecting a new ready process to run.\n");
+	SelectNewRunningProcess();
+}
+
 /* Prints all info about the process with the given PID parameter. */
 static void ProcInfo(int pid) {
 	printf("Requested info about process with PID %d:\n", pid);
@@ -485,7 +568,7 @@ static void ProcInfo(int pid) {
 
 /* Prints status of all the process queues to the terminal */
 static void TotalInfo() {
-	printf("High priority processes: ");
+	printf("High priority processes in queue: ");
 	if (ListCount(highReadyQueue) == 0) {
 		printf("NONE\n");
 	} else {
@@ -498,7 +581,7 @@ static void TotalInfo() {
 		printf("\n");
 	}
 
-	printf("Normal priority processes: ");
+	printf("Normal priority processes in queue: ");
 	if (ListCount(normalReadyQueue) == 0) {
 		printf("NONE\n");
 	} else {
@@ -511,7 +594,7 @@ static void TotalInfo() {
 		printf("\n");
 	}
 
-	printf("Low priority processes: ");
+	printf("Low priority processes in queue: ");
 	if (ListCount(lowReadyQueue) == 0) {
 		printf("NONE\n");
 	} else {
@@ -524,9 +607,9 @@ static void TotalInfo() {
 		printf("\n");
 	}
 
-	printf("Blocked processes: ");
+	printf("Blocked processes in queue: ");
 	if (ListCount(blockedQueue) == 0) {
-		printf("NONE\n");
+		printf("NONE\n\n");
 	} else {
 		ListFirst(blockedQueue);
 		for (int i = 0; i < ListCount(blockedQueue); i++) {
@@ -534,17 +617,19 @@ static void TotalInfo() {
 			printf("%d, ", process->pid);
 			ListNext(blockedQueue);
 		}
-		printf("\n");
+		printf("\n\n");
 	}
 
 	if (runningProcess != NULL) {
-		printf("Running process - PID: %d, Priority: %s\n", 
-			runningProcess->pid, PRIORITIES[runningProcess->priority]);
+		printf("Running process - PID: %d, Priority: %s, State: %s\n", 
+			runningProcess->pid, PRIORITIES[runningProcess->priority], STATES[runningProcess->state]);
 	} else {
 		printf("Running process: NONE\n");
 	}
-	printf("Init process - PID: %d, Priority: %s\n", 
-		initProcess->pid, PRIORITIES[initProcess->priority]);
+	printf("Init process - PID: %d, Priority: %s, State: %s\n\n", 
+		initProcess->pid, PRIORITIES[initProcess->priority], STATES[initProcess->state]);
+
+	printf("Message queue count: %d\n", ListCount(msgQueue));
 }
 
 /***************************************************************
@@ -567,7 +652,6 @@ static void AddProcessToReadyQueue(PROCESS *process) {
 		case INIT:
 			initProcess = process;
 			runningProcess = process;
-			process->state = RUNNING;
 			break;
 		default:
 			break;
@@ -732,4 +816,17 @@ static void RemovePidFromBlockedQueue(PROCESS *process) {
 	} else {
 		printf("Failed to remove process with PID %d from the blocked queue.\n", process->pid);
 	}
+}
+
+/**
+ * Searches the blocked queue for the given PID.
+ * Returns the process if found, NULL if not found.
+ */
+static PROCESS *SearchBlockedQueue(int pid) {
+	PROCESS *process = (PROCESS *)malloc(sizeof(process));
+	process->pid = pid;
+	ListFirst(blockedQueue);
+	PROCESS *foundProc = ListSearch(blockedQueue, PidComparator, process);
+	free(process);
+	return foundProc;
 }

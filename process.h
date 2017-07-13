@@ -30,4 +30,11 @@ typedef struct PROCESS {
 	PRIORITY priority;
 	STATE state;
 	int pid;
+	char *msg;
+	int msgIsReply;
 } PROCESS;
+
+typedef struct MSG {
+	char *text;
+	int pid;
+} MSG;
