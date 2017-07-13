@@ -50,6 +50,8 @@ static int NewSemaphore(int id, int value);
 static void P(int id);
 static void V(int id);
 static void Send();
+static void Receive();
+static void Reply();
 static void ProcInfo(int pid);
 static void TotalInfo();
 
@@ -57,10 +59,12 @@ static void SelectNewRunningProcess();
 static void PrintHelp();
 static void AddProcessToReadyQueue(PROCESS *process);
 static int PidComparator(void *proc1, void *proc2);
+static int MsgComparator(void *msg1, void *msg2);
 static PROCESS *GetProcByPid(int pid);
 static int FindProcByPidAndDelete(int pid);
 static void RemovePidFromBlockedQueue(PROCESS *process);
 static PROCESS *SearchBlockedQueue(int pid);
+static void HandleMsgIfReceived();
 
 /***************************************************************
  * Global Functions                                            *
@@ -89,6 +93,7 @@ int main(void) {
 		char *pidChars = NULL;
 		int pid = 0;
 
+		memset(inputBuffer, 0, sizeof(inputBuffer));
 		read(TERMINAL_FD, inputBuffer, BUF_SIZE);
 
 		/**
@@ -172,6 +177,22 @@ int main(void) {
 			case 'S':
 				printf("********** Send command issued **********\n");
 				Send();
+				break;
+
+			/* Receive */
+			case 'r':
+				/* fall-through */
+			case 'R':
+				printf("********** Receive command issued **********\n");
+				Receive();
+				break;
+
+			/* Reply */
+			case 'y':
+				/* fall-through */
+			case 'Y':
+				printf("********** Reply command issued **********\n");
+				Reply();
 				break;
 
 			/* Procinfo */
@@ -494,29 +515,31 @@ static void Send() {
 		return;
 	}
 
-	/* Build the message and add it to the inbox. */
+	/* Build the message struct to send. */
 	printf("Building the message to send to PID %d.\n", pid);
 	MSG *msg = (MSG *)malloc(sizeof(MSG));
 	char *msgContent = (char *)malloc(sizeof(char) * (strlen(inputMsg) + 1));
 	strcpy(msgContent, inputMsg);
-	msg->pid = pid;
+	msg->rcvPid = pid;
+	msg->sendPid = runningProcess->pid;
 	msg->text = msgContent;
-	ListAppend(msgQueue, msg);
+	msg->type = NEW;
 
 	/* Check if the process that the message will be sent to is already blocked on a receive. */
 	/* Search the blocked queue for the destination PID. */
 	PROCESS *rcvProcess = SearchBlockedQueue(pid);
-	if (rcvProcess) {
+	if (rcvProcess && rcvProcess->state == BLOCKED_RCV) {
 		printf("The destination process was already waiting for a message.\n");
 		
 		/* Copy the message to the process */
-		rcvProcess->msg = msgContent;
+		rcvProcess->msg = msg;
 
 		/* Wake up the process */
 		printf("Waking up the receiver process and placing it on the ready queue.\n");
 		rcvProcess->state = READY;
 		RemovePidFromBlockedQueue(rcvProcess);
 		AddProcessToReadyQueue(rcvProcess);
+		return;
 	}
 
 	/* Block the sending process until a reply is received. */
@@ -524,9 +547,111 @@ static void Send() {
 	runningProcess->state = BLOCKED_SEND;
 	ListAppend(blockedQueue, runningProcess);
 
+	/* Add the message to the inbox. */
+	ListAppend(msgQueue, msg);
+
 	/* Allow the next ready process to run. */
 	printf("Selecting a new ready process to run.\n");
 	SelectNewRunningProcess();
+}
+
+/** 
+ * Receive a message from any process.
+ * The running process will immediately receive and print a message if one is already queued 
+ * for it in the inbox.
+ * Will block the process if there is no message to receive for this process in the inbox.
+ */
+static void Receive() {
+	/* Check if the inbox contains messages queued for the receiving process. */
+	MSG *msgToFind = (MSG *)malloc(sizeof(MSG));
+	msgToFind->rcvPid = runningProcess->pid;
+	MSG *foundMsg = NULL;
+	ListFirst(msgQueue);
+	foundMsg = ListSearch(msgQueue, MsgComparator, msgToFind);
+	if (foundMsg) {
+		printf("There was a message already waiting in the queue for the running process (PID %d).\n", 
+			runningProcess->pid);
+		printf("Message received from PID %d.\n", foundMsg->sendPid);
+		printf("Message body: %s\n", foundMsg->text);
+
+		/* Remove the message from the queue and free memory used */
+		ListRemove(msgQueue);
+		free(foundMsg->text);
+		free(foundMsg);
+		free(msgToFind);
+		return;
+	}
+
+	/* Block the process if there was no message to receive in the inbox yet. */
+	printf("No message in the inbox for the running process (PID %d).\n", 
+		runningProcess->pid);
+	printf("Blocking the running process (PID %d) until a message is received.\n", 
+		runningProcess->pid);
+	runningProcess->state = BLOCKED_RCV;
+	ListAppend(blockedQueue, runningProcess);
+
+	/* Allow the next ready process to run. */
+	printf("Selecting a new ready process to run.\n");
+	SelectNewRunningProcess();
+}
+
+/** 
+ * Reply to a process that sent a message.
+ * Will fail if a process attempts to reply to a process that isn't blocked
+ * on a send.
+ */
+static void Reply() {
+	/**
+	 * Find the PID. Separate the PID and message by finding the space in between them 
+	 * and null-terminating the end of the PID. 
+	 */
+	char *space = strchr(inputBuffer + 2, ' ');
+	char *inputMsg = space + 1;
+	*space = '\0';
+
+	/* Parse out the PID and validate it. */
+	int pid = atoi(inputBuffer + 2);
+	if (pid < 0 || pid >= nextAvailPid) {
+		printf("Invalid PID specified (%d).\n", pid);
+		printf("Failed to send the message.\n");
+		return;
+	}
+
+	/* Check if the message is a valid length. */
+	if (strlen(inputMsg) > MAX_MSG_LEN) {
+		printf("The message is too long. The max length is 40 characters.\n");
+		printf("Failed to send the message.\n");
+		return;
+	} else if (!strlen(inputMsg)) {
+		printf("Empty messages can't be sent.\n");
+		printf("Failed to send the message.\n");
+		return;
+	}
+
+	PROCESS *replyProcess = SearchBlockedQueue(pid);
+	if (replyProcess && replyProcess->state == BLOCKED_SEND) {
+		printf("Replying to send blocked process with PID %d.\n", pid);
+		printf("Copying the message to the PCB of the receiver.\n");
+
+		/* Build the reply message, then copy it to the PCB of the receiver. */
+		MSG *msg = (MSG *)malloc(sizeof(MSG));
+		char *msgContent = (char *)malloc(sizeof(char) * (strlen(inputMsg) + 1));
+		strcpy(msgContent, inputMsg);
+		msg->rcvPid = pid;
+		msg->sendPid = runningProcess->pid;
+		msg->text = msgContent;
+		msg->type = REPLY;
+		replyProcess->msg = msg;
+
+		/* Unblock the reply receiver. */
+		printf("Waking up the receiver process and placing it on the ready queue.\n");
+		replyProcess->state = READY;
+		RemovePidFromBlockedQueue(replyProcess);
+		AddProcessToReadyQueue(replyProcess);
+	} else {
+		printf("Reply to PID %d failed. It wasn't in the blocked queue, or it wasn't send blocked.\n",
+			pid);
+	}
 }
 
 /* Prints all info about the process with the given PID parameter. */
@@ -626,10 +751,8 @@ static void TotalInfo() {
 	} else {
 		printf("Running process: NONE\n");
 	}
-	printf("Init process - PID: %d, Priority: %s, State: %s\n\n", 
+	printf("Init process - PID: %d, Priority: %s, State: %s\n", 
 		initProcess->pid, PRIORITIES[initProcess->priority], STATES[initProcess->state]);
-
-	printf("Message queue count: %d\n", ListCount(msgQueue));
 }
 
 /***************************************************************
@@ -668,6 +791,7 @@ static void SelectNewRunningProcess() {
 		runningProcess = newRunningProc;
 		runningProcess->state = RUNNING;
 		printf("The new running process has PID %d.\n", runningProcess->pid);
+		HandleMsgIfReceived();
 		return;
 	}
 	if (ListCount(normalReadyQueue) > 0) {
@@ -677,6 +801,7 @@ static void SelectNewRunningProcess() {
 		runningProcess = newRunningProc;
 		runningProcess->state = RUNNING;
 		printf("The new running process has PID %d.\n", runningProcess->pid);
+		HandleMsgIfReceived();
 		return;
 	}
 	if (ListCount(lowReadyQueue) > 0) {
@@ -686,6 +811,7 @@ static void SelectNewRunningProcess() {
 		runningProcess = newRunningProc;
 		runningProcess->state = RUNNING;
 		printf("The new running process has PID %d.\n", runningProcess->pid);
+		HandleMsgIfReceived();
 		return;
 	}
 
@@ -694,6 +820,7 @@ static void SelectNewRunningProcess() {
 	if (initProcess->state == READY || initProcess->state == RUNNING) {
 		printf("The INIT process is now running.\n");
 		runningProcess = initProcess;
+		HandleMsgIfReceived();
 	} else {
 		printf("The INIT process is blocked. No process is available to run.\n");
 		runningProcess = NULL;
@@ -712,6 +839,13 @@ static int PidComparator(void *proc1, void *proc2) {
 	PROCESS *process1 = (PROCESS *)proc1;
 	PROCESS *process2 = (PROCESS *)proc2;
 	return process1->pid == process2->pid;
+}
+
+/* Returns 0 if the message receiver PIDs don't match, 1 if the PIDs do match */
+static int MsgComparator(void *msg1, void *msg2) {
+	MSG *message1 = (MSG *)msg1;
+	MSG *message2 = (MSG *)msg2;
+	return message1->rcvPid == message2->rcvPid;
 }
 
 /**
@@ -829,4 +963,30 @@ static PROCESS *SearchBlockedQueue(int pid) {
 	PROCESS *foundProc = ListSearch(blockedQueue, PidComparator, process);
 	free(process);
 	return foundProc;
+}
+
+/**
+ * Used when a new process starts running.
+ * Checks if a new message or reply was received and displays it.
+ * Deletes the message after we're done using it.
+ */
+static void HandleMsgIfReceived() {
+	if (runningProcess->msg != NULL) {
+		switch(runningProcess->msg->type) {
+			case NEW:
+				printf("New message received from PID %d.\n", runningProcess->msg->sendPid);
+				break;
+			case REPLY:
+				printf("Reply received from PID %d.\n", runningProcess->msg->sendPid);
+				break;
+			default:
+				printf("Malformed message received...\n");
+				return;
+		}
+
+		printf("Message body: %s", runningProcess->msg->text);
+
+		free(runningProcess->msg->text);
+		free(runningProcess->msg);
+	}
 }

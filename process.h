@@ -21,20 +21,26 @@ typedef enum STATE {
 	BLOCKED_RCV
 } STATE;
 
+typedef enum MSG_TYPE {
+	NEW,
+	REPLY
+} MSG_TYPE;
+
 typedef struct SEMAPHORE {
 	int value;
 	LIST *blockedList;
 } SEMAPHORE;
 
+typedef struct MSG {
+	char *text;
+	int sendPid;
+	int rcvPid;
+	MSG_TYPE type;
+} MSG;
+
 typedef struct PROCESS {
 	PRIORITY priority;
 	STATE state;
 	int pid;
-	char *msg;
-	int msgIsReply;
+	MSG *msg;
 } PROCESS;
-
-typedef struct MSG {
-	char *text;
-	int pid;
-} MSG;
