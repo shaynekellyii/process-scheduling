@@ -56,6 +56,7 @@ static void AddProcessToReadyQueue(PROCESS *process);
 static int PidComparator(void *proc1, void *proc2);
 static PROCESS *GetProcByPid(int pid);
 static int FindProcByPidAndDelete(int pid);
+static void RemovePidFromBlockedQueue(PROCESS *process);
 
 /***************************************************************
  * Global Functions                                            *
@@ -149,6 +150,14 @@ int main(void) {
 			case 'P':
 				printf("********** Semaphore P command issued **********\n");
 				P((int)(inputBuffer[2] - '0'));
+				break;
+
+			/* V semaphore */
+			case 'v':
+				/* fall-through */
+			case 'V':
+				printf("********** Semaphore V command issued **********\n");
+				V((int)(inputBuffer[2] - '0'));
 				break;
 
 			/* Procinfo */
@@ -373,6 +382,13 @@ static void P(int id) {
 		return;
 	}
 
+	/* Check if there is a process running. Fail if there isn't. */
+	if (runningProcess == NULL) {
+		printf("There is no process currently running (all processes must be blocked).\n");
+		printf("Failed to P on semaphore %d.\n", id);
+		return;
+	}
+
 	SEMAPHORE *semaphore = semaphoreArr[id];
 	semaphore->value--;
 	printf("The semaphore value is now %d.\n", semaphore->value);
@@ -397,7 +413,37 @@ static void P(int id) {
 
 /* Implements the semaphore V function */
 static void V(int id) {
+	/* Check if semaphore ID is valid */
+	if (id < 0 || id >= NUM_SEMAPHORES) {
+		printf("The semaphore ID %d is invalid. ID must be between 0-4.\n", id);
+		printf("Failed to V on semaphore %d.\n", id);
+		return;
+	}
 
+	/* Check if semaphore is initialized */
+	if (semaphoreArr[id] == NULL) {
+		printf("The semaphore with ID %d has not been initialized yet.\n", id);
+		printf("Failed to V on semaphore %d.\n", id);
+		return;
+	}
+
+	SEMAPHORE *semaphore = semaphoreArr[id];
+	semaphore->value++;
+	printf("The semaphore value is now %d.\n", semaphore->value);
+
+	/* Wake up a blocked process if the sem value is <= 0 */
+	if (semaphore->value <= 0) {
+		printf("Waking up a process blocked on this semaphore.\n");
+		PROCESS *procToWake = ListFirst(semaphore->blockedList);
+		ListRemove(semaphore->blockedList);
+		printf("This process has PID %d and priority %s.\n", 
+			procToWake->pid, PRIORITIES[procToWake->priority]);
+		RemovePidFromBlockedQueue(procToWake);
+		AddProcessToReadyQueue(procToWake);
+	} else {
+		printf("The semaphore value is greater than 0.\n");
+		printf("There are no blocked processes to wake up.\n");
+	}
 }
 
 /* Prints all info about the process with the given PID parameter. */
@@ -672,4 +718,18 @@ static int FindProcByPidAndDelete(int pid) {
 	free(foundProc);
 	printf("Failed to kill process with PID %d\n", pid);
 	return 0;
+}
+
+/**
+ * Searches the blocked queue for the process given, and removes it from the queue.
+ */
+static void RemovePidFromBlockedQueue(PROCESS *process) {
+	ListFirst(blockedQueue);
+	PROCESS *foundProc = ListSearch(blockedQueue, PidComparator, process);
+	if (foundProc != NULL) {
+		ListRemove(blockedQueue);
+		printf("Successfully removed process with PID %d from the blocked queue.\n", process->pid);
+	} else {
+		printf("Failed to remove process with PID %d from the blocked queue.\n", process->pid);
+	}
 }
