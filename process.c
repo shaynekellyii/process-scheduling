@@ -56,7 +56,6 @@ static void ProcInfo(int pid);
 static void TotalInfo();
 
 static void SelectNewRunningProcess();
-static void PrintHelp();
 static void AddProcessToReadyQueue(PROCESS *process);
 static int PidComparator(void *proc1, void *proc2);
 static int MsgComparator(void *msg1, void *msg2);
@@ -213,16 +212,10 @@ int main(void) {
 				TotalInfo();
 				break;
 
-			/* Help */
-			case 'h':
-				/* fall-through */
-			case 'H':
-				PrintHelp();
-				break;
-
 			/* Invalid command */
 			default:
-				printf("Invalid command entered. Try again.\n");
+				printf("********** Invalid command issued **********\n");
+				printf("Please try again.\n");
 				break;
 		} /* End of command switch statement */
 
@@ -432,6 +425,14 @@ static void P(int id) {
 	
 	/* Block the running process if the sem value is < 0 */
 	if (semaphore->value < 0) {
+		/* Blocking the INIT process is not allowed. Fail to P */
+		if (runningProcess == initProcess) {
+			printf("The INIT process is not allowed to be blocked.\n");
+			printf("Reverting the semaphore value to %d.\n", ++semaphore->value);
+			printf("Failed to P on semaphore %d.\n", id);
+			return;
+		}
+
 		printf("Blocking the running process (PID %d).\n", runningProcess->pid);
 		runningProcess->state = BLOCKED_SEM;
 		ListAppend(blockedQueue, runningProcess);
@@ -539,20 +540,24 @@ static void Send() {
 		rcvProcess->state = READY;
 		RemovePidFromBlockedQueue(rcvProcess);
 		AddProcessToReadyQueue(rcvProcess);
-		return;
+	} else {
+		/* Add the message to the inbox. The receiver is not waiting for a message. */
+		ListAppend(msgQueue, msg);
 	}
 
 	/* Block the sending process until a reply is received. */
-	printf("Blocking the sending process (PID %d) until a reply is received.\n", runningProcess->pid);
-	runningProcess->state = BLOCKED_SEND;
-	ListAppend(blockedQueue, runningProcess);
+	if (runningProcess != initProcess) {
+		printf("Blocking the sending process (PID %d) until a reply is received.\n", runningProcess->pid);
+		runningProcess->state = BLOCKED_SEND;
+		ListAppend(blockedQueue, runningProcess);
 
-	/* Add the message to the inbox. */
-	ListAppend(msgQueue, msg);
-
-	/* Allow the next ready process to run. */
-	printf("Selecting a new ready process to run.\n");
-	SelectNewRunningProcess();
+		/* Allow the next ready process to run. */
+		printf("Selecting a new ready process to run.\n");
+		SelectNewRunningProcess();
+	} else {
+		/* Don't allow the INIT process to block. */
+		printf("The sender is the INIT process. Cannot block the INIT process.\n");
+	}
 }
 
 /** 
@@ -580,19 +585,27 @@ static void Receive() {
 		free(foundMsg);
 		free(msgToFind);
 		return;
+	} else { 
+		/* No message for the running process already in the inbox. */
+		printf("No message in the inbox for the running process (PID %d).\n", 
+			runningProcess->pid);
+
+		/* Block the process until a message is received for it. */
+		if (runningProcess != initProcess) {
+			printf("Blocking the running process (PID %d) until a message is received.\n", 
+				runningProcess->pid);
+			runningProcess->state = BLOCKED_RCV;
+			ListAppend(blockedQueue, runningProcess);
+
+			/* Allow the next ready process to run. */
+			printf("Selecting a new ready process to run.\n");
+			SelectNewRunningProcess();
+		} else {
+			/* INIT process not allowed to be blocked. */
+			printf("The receiver is the INIT process. Cannot block the INIT process.\n");
+		}
 	}
 
-	/* Block the process if there was no message to receive in the inbox yet. */
-	printf("No message in the inbox for the running process (PID %d).\n", 
-		runningProcess->pid);
-	printf("Blocking the running process (PID %d) until a message is received.\n", 
-		runningProcess->pid);
-	runningProcess->state = BLOCKED_RCV;
-	ListAppend(blockedQueue, runningProcess);
-
-	/* Allow the next ready process to run. */
-	printf("Selecting a new ready process to run.\n");
-	SelectNewRunningProcess();
 }
 
 /** 
@@ -829,11 +842,6 @@ static void SelectNewRunningProcess() {
 	return;
 }
 
-/* Prints instructions for process manipulation to the terminal */
-static void PrintHelp() {
-
-}
-
 /* Returns 0 if the processes PIDs don't match, 1 if the PIDs do match */
 static int PidComparator(void *proc1, void *proc2) {
 	PROCESS *process1 = (PROCESS *)proc1;
@@ -988,5 +996,6 @@ static void HandleMsgIfReceived() {
 
 		free(runningProcess->msg->text);
 		free(runningProcess->msg);
+		runningProcess->msg = NULL;
 	}
 }
